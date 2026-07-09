@@ -1,0 +1,46 @@
+# Theia EMULaToR bench commands
+
+conda run -n mldb python emulator_bench/dataset_adapter.py \
+  --source_dataset_dir /home/adhil/github/EMULaToR/data/processed/datasets/enzyme_retrieval_dataset \
+  --base_dir /home/adhil/github/EMULaToR/data/processed/baselines/theia
+
+conda run -n mldb python emulator_bench/cache_features.py \
+  --base_dir /home/adhil/github/EMULaToR/data/processed/baselines/theia \
+  --embeddings_dir /home/adhil/github/EMULaToR/data/processed/baselines/theia/embeddings \
+  --num_workers 32 \
+  --batch_size 1024
+
+conda run -n mldb python emulator_bench/run_split_benchmarks.py \
+  --base_dir /home/adhil/github/EMULaToR/data/processed/baselines/theia \
+  --embeddings_dir /home/adhil/github/EMULaToR/data/processed/baselines/theia/embeddings \
+  --cache_num_workers 16 \
+  --cache_batch_size 1024 \
+  --gpus 2 \
+  --runs_per_gpu 6
+
+# Smoke test
+CUDA_VISIBLE_DEVICES=0 conda run -n mldb python emulator_bench/run_split_benchmarks.py \
+  --source_dataset_dir /home/adhil/github/EMULaToR/data/processed/datasets/enzyme_retrieval_dataset \
+  --base_dir /home/adhil/github/EMULaToR/data/processed/baselines/theia_smoke \
+  --embeddings_dir /home/adhil/github/EMULaToR/data/processed/baselines/theia_smoke/embeddings \
+  --copy_splits \
+  --levels ec1 \
+  --split_groups random_splits \
+  --max_rows 128 \
+  --device cuda:0
+
+# Optional Optuna
+CUDA_VISIBLE_DEVICES=0 conda run -n mldb python emulator_bench/tune_optuna.py \
+  --base_dir /home/adhil/github/EMULaToR/data/processed/baselines/theia \
+  --embeddings_dir /home/adhil/github/EMULaToR/data/processed/baselines/theia/embeddings \
+  --split_group random_splits \
+  --split_name random_splits \
+  --level ec1234 \
+  --device cuda:0
+
+# Optional retrain from Optuna best hparams
+conda run -n mldb python emulator_bench/launch_parallel_retrain_from_optuna.py \
+  --base_dir /home/adhil/github/EMULaToR/data/processed/baselines/theia \
+  --embeddings_dir /home/adhil/github/EMULaToR/data/processed/baselines/theia/embeddings \
+  --levels ec1 ec12 ec123 ec1234 \
+  --gpus 0

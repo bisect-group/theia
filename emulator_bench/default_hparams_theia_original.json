@@ -1,0 +1,17 @@
+{
+  "input_dim": 10240,
+  "hidden_dim": 1664,
+  "batch_size": 64,
+  "epochs": 50,
+  "patience": 5,
+  "min_delta": 0.001,
+  "lr": 0.001,
+  "scheduler_gamma": 0.9,
+  "optimizer": "adam",
+  "criterion": "cross_entropy",
+  "drfp_radius": 2,
+  "drfp_n_folded_length": 10240,
+  "drfp_root_central_atom": false,
+  "drfp_include_hydrogens": true,
+  "note": "Original Theia paper/script settings, with bench-only AMP/checkpoint/resume additions."
+}
