@@ -1,0 +1,4 @@
+# Aggregate completed Theia test metrics across seeds.
+conda run -n mldb python -m emulator_bench.aggregate_results \
+  --base-dir /home/adhil/github/EMULaToR/data/processed/baselines/theia \
+  --output-dir /home/adhil/github/EMULaToR/data/processed/baselines/theia/aggregated_metrics

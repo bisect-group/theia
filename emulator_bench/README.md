@@ -139,3 +139,18 @@ CUDA_VISIBLE_DEVICES=0 conda run -n mldb python emulator_bench/run_split_benchma
 ```
 
 Optuna tuning is optional. Default retraining does not use Optuna.
+
+## Aggregate Metrics
+
+Aggregate all completed Theia test runs:
+
+```bash
+conda run -n mldb python -m emulator_bench.aggregate_results \
+  --base-dir /home/adhil/github/EMULaToR/data/processed/baselines/theia \
+  --output-dir /home/adhil/github/EMULaToR/data/processed/baselines/theia/aggregated_metrics
+```
+
+The command validates prediction-derived classification and hierarchy metrics,
+then writes `per_run_metrics.csv`, `summary_metrics.csv`,
+`summary_metrics.json`, and `diagnostics.json`. Add `--strict` to fail after
+writing reports when any discovered run is incomplete or invalid.

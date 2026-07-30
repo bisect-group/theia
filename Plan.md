@@ -67,5 +67,6 @@
 4. Cache DRFP fingerprints once per unique reaction and create split-specific cached tables.
 5. Launch training for each discovered split and EC level using default Theia settings.
 6. Evaluate test metrics and hierarchy metrics.
-7. Run a small smoke test on `cuda:0`.
-8. Record outputs, metrics, cache locations, and reproduction commands.
+7. Aggregate completed test-run metrics with `python -m emulator_bench.aggregate_results`, validating saved prediction metrics and publishing per-run CSV, grouped CSV/JSON, and diagnostics reports.
+8. Run a small smoke test on `cuda:0`.
+9. Record outputs, metrics, cache locations, and reproduction commands.
