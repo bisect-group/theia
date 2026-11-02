@@ -1,156 +1,45 @@
-# Theia EMULaToR Bench
+# Theia emulator_bench
 
-This bench retrains Theia on EMULaToR enzyme retrieval splits without modifying Theia's original source files.
+This wrapper trains Theia (reaction to EC number) on the default EMULaToR enzyme retrieval splits with the original settings. It runs seeds 666, 777 and 888 on every split. It does not tune anything. The original Theia code is not changed.
 
-## Inputs
+## Data
 
-Each split file must contain:
+Default dataset: `data/processed/datasets/enzyme_retrieval_dataset` (reaction-only splits, not `with_protein_information`).
+The wrapper reads these splits and never writes into the data folder:
 
-- `rxn_smiles`: reaction SMILES
-- `ec_number`: EC label
-- `uniprot_date`: preserved if present, not used by the model
+- `random_splits_grouped_rxn_key`
+- `uniprot_time_splits`
+- `reaction_drfp_tanimoto_splits/threshold_*`
 
-The source split tree is copied from:
+Each split has `train.parquet`, `val.parquet` and `test.parquet` with `rxn_smiles` and `ec_number`.
 
-```text
-~/github/EMULaToR/data/processed/datasets/enzyme_retrieval_dataset
-```
+## Method and settings
 
-to:
+Theia turns each reaction into a 10240-bit DRFP fingerprint (radius 2, hydrogens, no central-atom root).
+A two-layer MLP (`theia.ml.MLPClassifier`: 10240 to 1664, tanh, 1664 to the number of ECs) predicts the EC.
+The label is the full four-part EC number. The settings are in `default_hparams_theia_original.json`, with the source of each value:
+Adam lr 0.001, ExponentialLR gamma 0.9, batch size 64, at most 50 epochs, early stopping on the mean of the last 5 validation losses.
+As in the original, batches follow the stored row order (no shuffle), the label encoder sees the labels of all three splits,
+and the test pass uses the model of the last epoch. Training is fp32.
 
-```text
-~/github/EMULaToR/data/processed/baselines/theia
-```
+## Cache
 
-## Features And Cache
+`cache_features.py` computes the fingerprints once per unique reaction SMILES of all discovered splits.
+The store is `outputs/baselines/Theia/embeddings/drfp_v1_r2_n10240_h1_root0/<key-set hash>/`. It holds `fps.npy` (bit-packed) and `keys.parquet`.
+A different set of reactions gives a different hash, so a changed dataset builds a new store.
 
-The model uses Theia's DRFP reaction fingerprints:
+## Outputs
 
-- `radius=2`
-- `n_folded_length=10240`
-- `root_central_atom=False`
-- `include_hydrogens=True`
+`outputs/baselines/Theia/enzyme_retrieval/<split_group>/<split_name>/seed_<seed>/` holds:
 
-Fingerprints are cached once per unique reaction at:
+- `test_predictions.parquet`: one row per test row with `query` (the reaction), `ec_number`, `top_ec` and `top_score` (top 50 ECs, best first, logits).
+- `ec_level_accuracy_no_b.json`: EC level accuracy at k = 1, 3, 5, 10, 20, 30, 40, 50 and levels 1 to 4. Preliminary ECs (such as `3.4.23.B9`) leave the truth and the ranked lists. Reactions without a full EC are not scored. This is the score to report.
+- `ec_level_accuracy.json`: the same without the preliminary-EC filter.
+- `metrics.json`, `logfile.csv` (loss per epoch), `lastmodel.pth`.
 
-```text
-~/github/EMULaToR/data/processed/baselines/theia/embeddings/reactions/drfp_r2_10240_h1_root0
-```
-
-Each split also gets level-specific cached tables under:
-
-```text
-<split_dir>/theia_cache/<ec1|ec12|ec123|ec1234>/{train,val,test}.parquet
-```
-
-## Model And Training
-
-The bench reuses `theia.ml.MLPClassifier`:
-
-- input size `10240`
-- hidden size `1664`
-- output size equal to the split/level class count
-- CrossEntropyLoss
-- Adam with learning rate `0.001`
-- ExponentialLR with gamma `0.9`
-- batch size `64`
-- max `50` epochs
-- early stopping patience `5`, min improvement `0.001`
-
-Bench-only speed and reliability additions:
-
-- AMP: bf16 on Ampere-or-newer CUDA, otherwise fp16
-- TF32 enabled for CUDA matmul/cuDNN
-- atomic feature writes
-- `checkpoint_last.pt` resume
-- completed-run skipping via `metrics.json` and `predictions.csv`
-- Rich progress displays
-
-## Metrics
-
-Theia is a classification model, so the bench reports:
-
-- accuracy
-- macro F1
-- weighted F1
-- MCC
-- confusion matrix
-- EC hierarchy accuracy for L1-L4
-
-Partial EC labels match any valid predicted class under the known prefix. For example, `1.-.-.-` can match any predicted EC beginning with `1`, and `2.7.4.-` can match any predicted EC beginning with `2.7.4`.
-
-Accepted numeric EC syntax:
-
-- L1: `1-7`
-- L2: `1-99`
-- L3: `1-99`
-- L4: `1-999`
+`aggregate_results.py` writes `summary_runs.csv` and `summary_by_split.csv` (mean and std over seeds, k = 1) in `outputs/baselines/Theia/enzyme_retrieval/`.
 
 ## Commands
 
-Use the `mldb` environment.
-
-Copy and validate splits:
-
-```bash
-conda run -n mldb python emulator_bench/dataset_adapter.py \
-  --source_dataset_dir /home/adhil/github/EMULaToR/data/processed/datasets/enzyme_retrieval_dataset \
-  --base_dir /home/adhil/github/EMULaToR/data/processed/baselines/theia
-```
-
-Cache features:
-
-```bash
-conda run -n mldb python emulator_bench/cache_features.py \
-  --base_dir /home/adhil/github/EMULaToR/data/processed/baselines/theia \
-  --embeddings_dir /home/adhil/github/EMULaToR/data/processed/baselines/theia/embeddings \
-  --num_workers 8 \
-  --batch_size 1024
-```
-
-`--num_workers` controls parallel DRFP encoder processes. The parent process writes cache files atomically, so killed runs remain restartable.
-
-Run all default split benchmarks:
-
-```bash
-conda run -n mldb python emulator_bench/run_split_benchmarks.py \
-  --base_dir /home/adhil/github/EMULaToR/data/processed/baselines/theia \
-  --embeddings_dir /home/adhil/github/EMULaToR/data/processed/baselines/theia/embeddings \
-  --cache_num_workers 8 \
-  --cache_batch_size 1024 \
-  --gpus 0 1 2 3 \
-  --runs_per_gpu 2
-```
-
-Each training subprocess is isolated with `CUDA_VISIBLE_DEVICES=<physical_gpu>` and receives `--device cuda:0`, so the visible device inside the subprocess is always local `cuda:0`.
-
-Small smoke run:
-
-```bash
-CUDA_VISIBLE_DEVICES=0 conda run -n mldb python emulator_bench/run_split_benchmarks.py \
-  --source_dataset_dir /home/adhil/github/EMULaToR/data/processed/datasets/enzyme_retrieval_dataset \
-  --base_dir /home/adhil/github/EMULaToR/data/processed/baselines/theia_smoke \
-  --embeddings_dir /home/adhil/github/EMULaToR/data/processed/baselines/theia_smoke/embeddings \
-  --copy_splits \
-  --levels ec1 \
-  --split_groups random_splits \
-  --max_rows 128 \
-  --device cuda:0
-```
-
-Optuna tuning is optional. Default retraining does not use Optuna.
-
-## Aggregate Metrics
-
-Aggregate all completed Theia test runs:
-
-```bash
-conda run -n mldb python -m emulator_bench.aggregate_results \
-  --base-dir /home/adhil/github/EMULaToR/data/processed/baselines/theia \
-  --output-dir /home/adhil/github/EMULaToR/data/processed/baselines/theia/aggregated_metrics
-```
-
-The command validates prediction-derived classification and hierarchy metrics,
-then writes `per_run_metrics.csv`, `summary_metrics.csv`,
-`summary_metrics.json`, and `diagnostics.json`. Add `--strict` to fail after
-writing reports when any discovered run is incomplete or invalid.
+See `commands.txt`. Run them from the submodule root (`baselines/theia`).
+`verify_equivalence.sh` checks the wrapper against the original code on a small real fixture (CPU).

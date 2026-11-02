@@ -1,4 +1,18 @@
-# Aggregate completed Theia test metrics across seeds.
-conda run -n mldb python -m emulator_bench.aggregate_results \
-  --base-dir /home/adhil/github/EMULaToR/data/processed/baselines/theia \
-  --output-dir /home/adhil/github/EMULaToR/data/processed/baselines/theia/aggregated_metrics
+# Run from the submodule root (baselines/theia). PY is the mldb python:
+PY=/path/to/conda/envs/mldb/bin/python
+
+# All splits x seeds 666 777 888 (9 runs) on GPU 0. The launcher builds the fingerprint cache first.
+$PY emulator_bench/run_split_benchmarks.py --gpus 0 --runs_per_gpu 3
+
+# Cache only.
+$PY emulator_bench/cache_features.py
+
+# One split and seed. FEATURE_DIR is printed by cache_features.py.
+$PY emulator_bench/train.py --split_group random_splits_grouped_rxn_key --seed 666 --feature_dir $FEATURE_DIR
+$PY emulator_bench/train.py --split_group reaction_drfp_tanimoto_splits --split_name threshold_0.425 --seed 666 --feature_dir $FEATURE_DIR
+
+# Mean and std over seeds.
+$PY emulator_bench/aggregate_results.py
+
+# Equivalence check against the original code (CPU).
+bash emulator_bench/verify_equivalence.sh

@@ -7,11 +7,14 @@
   "min_delta": 0.001,
   "lr": 0.001,
   "scheduler_gamma": 0.9,
-  "optimizer": "adam",
-  "criterion": "cross_entropy",
-  "drfp_radius": 2,
-  "drfp_n_folded_length": 10240,
-  "drfp_root_central_atom": false,
-  "drfp_include_hydrogens": true,
-  "note": "Original Theia paper/script settings, with bench-only AMP/checkpoint/resume additions."
+  "sources": {
+    "input_dim": "scripts/encode_split_data.py: n_folded_length=10240 (DRFP radius 2, include_hydrogens True, root_central_atom False)",
+    "hidden_dim": "scripts/train.py:224 train_test_model default; scripts/train.py main passes 1664",
+    "batch_size": "scripts/train.py:245-246,269 DataLoader(batch_size=64), no shuffle",
+    "epochs": "scripts/train.py main: train_test_model(epochs=50)",
+    "patience": "scripts/train.py:227,255-258: stop when valid_loss - mean(last 5 valid losses) > -min_delta",
+    "min_delta": "scripts/train.py:258 (0.001)",
+    "lr": "scripts/train.py:231 Adam(lr=0.001), no weight decay",
+    "scheduler_gamma": "scripts/train.py:232 ExponentialLR(gamma=0.9), stepped once per epoch"
+  }
 }

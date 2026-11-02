@@ -1,231 +1,74 @@
-import csv
-import hashlib
 import json
 import os
 import random
-import shutil
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence
+from typing import Dict, List
 
 import numpy as np
 import pandas as pd
 import torch
-from rich.console import Console
-from rich.table import Table
-
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SRC_ROOT = REPO_ROOT / "src"
-DEFAULT_SOURCE_DATA_DIR = Path("/home/adhil/github/EMULaToR/data/processed/datasets/enzyme_retrieval_dataset")
-DEFAULT_BASE_DIR = Path("/home/adhil/github/EMULaToR/data/processed/baselines/theia")
-DEFAULT_EMBEDDINGS_DIR = DEFAULT_BASE_DIR / "embeddings"
-DEFAULT_RESULTS_DIRNAME = "theia_results"
-DEFAULT_LEVELS = ["ec1", "ec12", "ec123", "ec1234"]
-DEFAULT_DEVICE = "cuda:0"
+EMULATOR_ROOT = Path(__file__).resolve().parents[3]
+DEFAULT_DATASET_DIR = EMULATOR_ROOT / "data" / "processed" / "datasets" / "enzyme_retrieval_dataset"
+DEFAULT_OUT_ROOT = EMULATOR_ROOT / "outputs" / "baselines" / "Theia"
+DEFAULT_HPARAMS_PATH = REPO_ROOT / "emulator_bench" / "default_hparams_theia_original.json"
+TASK = "enzyme_retrieval"
+DEFAULT_SPLIT_GROUPS = ["random_splits_grouped_rxn_key", "uniprot_time_splits", "reaction_drfp_tanimoto_splits"]
+DEFAULT_SEEDS = [666, 777, 888]
 REQUIRED_COLUMNS = ("rxn_smiles", "ec_number")
-SPECIAL_DIRS = {"embeddings", "optuna_studies", "bench_summaries"}
-DRFP_CACHE_TAG = "drfp_r2_10240_h1_root0"
-
-console = Console()
-
-
-@dataclass(frozen=True)
-class SplitJob:
-    split_group: str
-    split_name: str
-    root_dir: Path
-    train_path: Path
-    val_path: Path
-    test_path: Path
-
-    def as_dict(self) -> Dict[str, str]:
-        return {
-            "split_group": self.split_group,
-            "split_name": self.split_name,
-            "root_dir": str(self.root_dir),
-            "train_path": str(self.train_path),
-            "val_path": str(self.val_path),
-            "test_path": str(self.test_path),
-        }
-
-
-def stable_hash(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
-
-
-def normalize_rxn_smiles(value: str) -> str:
-    return str(value).strip()
-
-
-def feature_cache_path(embeddings_dir: Path, rxn_smiles: str) -> Path:
-    key = stable_hash(normalize_rxn_smiles(rxn_smiles))
-    return Path(embeddings_dir) / "reactions" / DRFP_CACHE_TAG / key[:2] / f"{key}.npz"
-
-
-def ensure_parent(path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-
-
-def atomic_write_text(path: Path, text: str) -> None:
-    ensure_parent(path)
-    tmp_path = Path(str(path) + f".tmp.{os.getpid()}")
-    tmp_path.write_text(text)
-    tmp_path.replace(path)
-
-
-def atomic_save_npz(path: Path, **payload) -> None:
-    ensure_parent(path)
-    tmp_path = Path(str(path) + f".tmp.{os.getpid()}")
-    with open(tmp_path, "wb") as handle:
-        np.savez_compressed(handle, **payload)
-    tmp_path.replace(path)
-
-
-def save_json(path: Path, payload: Dict) -> None:
-    atomic_write_text(path, json.dumps(payload, indent=2, sort_keys=True))
 
 
 def load_json(path: Path) -> Dict:
     return json.loads(Path(path).read_text())
 
 
-def append_csv_row(path: Path, row: Dict) -> None:
-    ensure_parent(path)
-    exists = path.exists()
-    with open(path, "a", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=list(row.keys()))
-        if not exists:
-            writer.writeheader()
-        writer.writerow(row)
+def atomic_write(path: Path, write) -> None:
+    """Call `write(tmp_path)`, then move the temp file (in the target folder) onto `path`."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.tmp.{os.getpid()}")
+    write(tmp)
+    tmp.replace(path)
+
+
+def save_json(path: Path, payload: Dict) -> None:
+    atomic_write(path, lambda tmp: tmp.write_text(json.dumps(payload, indent=2, sort_keys=True)))
 
 
 def set_seed(seed: int) -> None:
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
+    torch.cuda.manual_seed_all(seed)
 
 
-def configure_torch() -> None:
-    if torch.cuda.is_available():
-        torch.backends.cuda.matmul.allow_tf32 = True
-        torch.backends.cudnn.allow_tf32 = True
-        torch.backends.cudnn.benchmark = True
-
-
-def resolve_device(device_name: str = DEFAULT_DEVICE) -> torch.device:
-    if not torch.cuda.is_available():
-        return torch.device("cpu")
-    requested = torch.device(device_name)
-    if requested.type != "cuda":
-        return requested
-    index = requested.index if requested.index is not None else 0
-    if index < torch.cuda.device_count():
-        return torch.device(f"cuda:{index}")
-    return torch.device("cuda:0")
-
-
-def amp_dtype_for_device(device: torch.device):
-    if device.type != "cuda":
-        return None, "fp32"
-    major, _minor = torch.cuda.get_device_capability(device)
-    return (torch.bfloat16, "bf16-mixed") if major >= 8 else (torch.float16, "fp16-mixed")
-
-
-def read_table(path: Path) -> pd.DataFrame:
-    path = Path(path)
-    if path.suffix.lower() == ".parquet":
-        return pd.read_parquet(path)
-    if path.suffix.lower() == ".csv":
-        return pd.read_csv(path)
-    raise ValueError(f"Unsupported table format: {path}")
-
-
-def write_table(df: pd.DataFrame, path: Path) -> None:
-    ensure_parent(path)
-    tmp_path = Path(str(path) + f".tmp.{os.getpid()}{path.suffix}")
-    if path.suffix.lower() == ".parquet":
-        df.to_parquet(tmp_path, index=False)
-    elif path.suffix.lower() == ".csv":
-        df.to_csv(tmp_path, index=False)
-    else:
-        raise ValueError(f"Unsupported table format: {path}")
-    tmp_path.replace(path)
-
-
-def require_columns(df: pd.DataFrame, required: Iterable[str], path: Path) -> None:
-    missing = [column for column in required if column not in df.columns]
+def read_split(path: Path) -> pd.DataFrame:
+    frame = pd.read_parquet(path)
+    missing = [column for column in REQUIRED_COLUMNS if column not in frame.columns]
     if missing:
         raise ValueError(f"Missing required columns {missing} in {path}")
+    return frame
 
 
-def split_file(directory: Path, stem: str) -> Optional[Path]:
-    for suffix in (".parquet", ".csv"):
-        candidate = Path(directory) / f"{stem}{suffix}"
-        if candidate.exists():
-            return candidate
-    return None
+def split_file(directory: Path, stem: str):
+    path = Path(directory) / f"{stem}.parquet"
+    return path if path.exists() else None
 
 
-def copy_dataset_splits(source_dir: Path = DEFAULT_SOURCE_DATA_DIR, base_dir: Path = DEFAULT_BASE_DIR, overwrite: bool = False) -> List[Path]:
-    source_dir = Path(source_dir).expanduser()
-    base_dir = Path(base_dir).expanduser()
-    copied: List[Path] = []
-    for src in source_dir.rglob("*"):
-        if not src.is_file():
-            continue
-        rel = src.relative_to(source_dir)
-        dest = base_dir / rel
-        if dest.exists() and not overwrite and dest.stat().st_size == src.stat().st_size:
-            continue
-        ensure_parent(dest)
-        shutil.copy2(src, dest)
-        copied.append(dest)
-    return copied
-
-
-def discover_split_jobs(base_dir: Path = DEFAULT_BASE_DIR, split_groups: Optional[Sequence[str]] = None) -> List[SplitJob]:
-    base_dir = Path(base_dir).expanduser()
-    candidates: List[Path] = []
-    if not base_dir.exists():
-        return []
-    for child in sorted(base_dir.iterdir()):
-        if not child.is_dir() or child.name in SPECIAL_DIRS:
-            continue
-        if split_groups and child.name not in split_groups:
-            continue
-        candidates.append(child)
-        for grandchild in sorted(child.iterdir()):
-            if grandchild.is_dir():
-                candidates.append(grandchild)
-    jobs: List[SplitJob] = []
-    for directory in candidates:
-        train = split_file(directory, "train")
-        val = split_file(directory, "val")
-        test = split_file(directory, "test")
-        if not (train and val and test):
-            continue
-        rel = directory.relative_to(base_dir)
-        jobs.append(SplitJob(rel.parts[0], rel.parts[-1], directory, train, val, test))
+def discover_split_jobs(dataset_dir: Path, split_groups: List[str]) -> List[Dict[str, Path]]:
+    """Flat groups give split_name `all`; groups with `threshold_*` folders give one job per folder."""
+    jobs = []
+    for group in split_groups:
+        group_dir = Path(dataset_dir) / group
+        candidates = [("all", group_dir)] + [(d.name, d) for d in sorted(group_dir.glob("threshold_*")) if d.is_dir()]
+        for name, directory in candidates:
+            paths = {stem: split_file(directory, stem) for stem in ("train", "val", "test")}
+            if all(paths.values()):
+                jobs.append({"split_group": group, "split_name": name, **{f"{stem}_path": path for stem, path in paths.items()}})
     return jobs
 
 
-def render_jobs_table(jobs: Sequence[SplitJob], title: str = "Theia split jobs") -> None:
-    table = Table(title=title)
-    table.add_column("group")
-    table.add_column("split")
-    table.add_column("root")
-    for job in jobs:
-        table.add_row(job.split_group, job.split_name, str(job.root_dir))
-    console.print(table)
-
-
-def completed_run(out_dir: Path) -> bool:
-    out_dir = Path(out_dir)
-    return (out_dir / "metrics.json").exists() and (out_dir / "predictions.csv").exists()
-
-
-def cached_split_path(job: SplitJob, level: str, split: str) -> Path:
-    return job.root_dir / "theia_cache" / level / f"{split}.parquet"
+def run_dir(out_root: Path, split_group: str, split_name: str, seed: int) -> Path:
+    return Path(out_root) / TASK / split_group / split_name / f"seed_{seed}"

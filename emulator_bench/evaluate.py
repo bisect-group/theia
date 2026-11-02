@@ -1,66 +1,46 @@
-import argparse
-import json
-import pickle
-import sys
-from pathlib import Path
+"""EC level accuracy on Theia test predictions (same definition as src/utils/ec_level_accuracy.py in EMULaToR)."""
 
+import re
+
+import numpy as np
 import pandas as pd
-import torch
-from sklearn.metrics import accuracy_score, confusion_matrix, f1_score, matthews_corrcoef
-from torch.utils.data import DataLoader
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
-from emulator_bench.common import DEFAULT_DEVICE, console, read_table, save_json
-from emulator_bench.ec import build_level_vocab, hierarchy_accuracies
-from emulator_bench.modeling import CachedReactionDataset, build_model, predict_logits
+EC_LEVELS = (1, 2, 3, 4)
+KS = (1, 3, 5, 10, 20, 30, 40, 50)
+FULL_EC = r"\d+\.\d+\.\d+\.\d+"
+FULL_EC_RE = re.compile(FULL_EC)
+MISS_EC = "0.0.0.0"
 
 
-def evaluate_run(run_dir: Path, split_path: Path, device_name: str = DEFAULT_DEVICE, batch_size: int = 256, level: str = "ec1234") -> dict:
-    run_dir = Path(run_dir)
-    split = read_table(split_path)
-    with open(run_dir / "label_encoder.pkl", "rb") as handle:
-        label_encoder = pickle.load(handle)
-    split["encoded_label"] = label_encoder.transform(split["label"].astype(str))
-    device = torch.device(device_name if torch.cuda.is_available() else "cpu")
-    model = build_model(10240, int(json.loads((run_dir / "hparams.json").read_text())["hidden_dim"]), len(label_encoder.classes_))
-    model.load_state_dict(torch.load(run_dir / "best_model.pt", map_location=device))
-    model.to(device)
-    loader = DataLoader(CachedReactionDataset(split), batch_size=batch_size, shuffle=False, num_workers=0)
-    y_true_idx, y_pred_idx, indices, loss = predict_logits(model, loader, device)
-    y_true = label_encoder.inverse_transform(y_true_idx)
-    y_pred = label_encoder.inverse_transform(y_pred_idx)
-    ordered = split.iloc[indices].copy()
-    vocab_by_level = {name: build_level_vocab(ordered["ec_number"].astype(str), name) for name in ("ec1", "ec12", "ec123", "ec1234")}
-    metrics = {
-        "loss": loss,
-        "accuracy": float(accuracy_score(y_true, y_pred)),
-        "macro_f1": float(f1_score(y_true, y_pred, average="macro", zero_division=0)),
-        "weighted_f1": float(f1_score(y_true, y_pred, average="weighted", zero_division=0)),
-        "mcc": float(matthews_corrcoef(y_true, y_pred)) if len(set(y_true)) > 1 and len(set(y_pred)) > 1 else 0.0,
-        "n_samples": int(len(y_true)),
-        "level": level,
-    }
-    metrics.update(hierarchy_accuracies(ordered["ec_number"].astype(str).tolist(), list(y_pred), vocab_by_level=vocab_by_level))
-    predictions = ordered[["row_id", "rxn_smiles", "ec_number", "label"]].copy()
-    predictions["prediction"] = y_pred
-    predictions.to_csv(run_dir / "predictions.csv", index=False)
-    pd.DataFrame(confusion_matrix(y_true, y_pred, labels=label_encoder.classes_), index=label_encoder.classes_, columns=label_encoder.classes_).to_csv(run_dir / "confusion_matrix.csv")
-    save_json(run_dir / "metrics.json", metrics)
-    return metrics
+def matched_levels(true_ec: str, pred_ec: str) -> int:
+    matched = 0
+    for pred_part, true_part in zip(pred_ec.split("."), true_ec.split(".")):
+        if pred_part != true_part:
+            break
+        matched += 1
+    return matched
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Evaluate a Theia EMULaToR bench run.")
-    parser.add_argument("--run_dir", required=True)
-    parser.add_argument("--split_path", required=True)
-    parser.add_argument("--device", default=DEFAULT_DEVICE)
-    parser.add_argument("--batch_size", type=int, default=256)
-    parser.add_argument("--level", default="ec1234")
-    args = parser.parse_args()
-    metrics = evaluate_run(Path(args.run_dir), Path(args.split_path), args.device, args.batch_size, args.level)
-    console.print(metrics)
+def ec_level_accuracy(frame: pd.DataFrame, drop_preliminary: bool) -> dict:
+    """Per test reaction and k: share of its true ECs that the top-k ECs match to level n (best prefix match), mean x 100.
 
-
-if __name__ == "__main__":
-    main()
+    `frame` has one row per test row with `query`, `ec_number`, `top_ec` (best first). With `drop_preliminary`,
+    preliminary ECs (such as 3.4.23.B9) leave the truth and the ranked lists, and reactions without a full EC are not scored.
+    """
+    if drop_preliminary:
+        frame = frame[frame["ec_number"].str.fullmatch(FULL_EC)]
+    true_ecs, ranked = [], []
+    for _, rows in frame.groupby("query", sort=False):
+        top = list(rows["top_ec"].iloc[0])
+        ranked.append([ec for ec in top if FULL_EC_RE.fullmatch(ec)] if drop_preliminary else top)
+        true_ecs.append(sorted(set(rows["ec_number"])))
+    result = {}
+    for k in KS:
+        scores = np.zeros((len(true_ecs), len(EC_LEVELS)))
+        for i, (trues, ranking) in enumerate(zip(true_ecs, ranked)):
+            top = ranking[:k] or [MISS_EC]
+            best = np.array([max(matched_levels(t, p) for p in top) for t in trues])
+            scores[i] = [(best >= n).mean() for n in EC_LEVELS]
+        means = scores.mean(axis=0) * 100.0
+        result[f"k={k}"] = {f"level_{n}_accuracy": float(m) for n, m in zip(EC_LEVELS, means)}
+    return {**result, "n_queries": len(true_ecs), "n_rows": len(frame)}
